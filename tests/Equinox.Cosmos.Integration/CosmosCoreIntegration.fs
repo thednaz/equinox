@@ -325,3 +325,29 @@ type Tests(testOutputHelper) =
         [1,5] =! capture.ChooseCalls queryRoundTripsAndItemCounts
         verifyRequestChargesMax 4 // 3.24 // WAS 3 // 2.98
     }
+
+    (* Delete *)
+    [<AutoData(SkipIfRequestedViaEnvironmentVariable="EQUINOX_INTEGRATION_SKIP_COSMOS")>]
+    let delete (TestStream streamName) = Async.RunSynchronously <| async {
+        capture.Clear()
+        let! conn = connectToSpecifiedCosmosOrSimulator log
+        let ctx = mkContextWithItemLimit conn None
+
+        let! expected = add6EventsIn2Batches ctx streamName
+        let expected = [| Array.last expected |]
+
+        // Trigger deletion of first batch
+        let! deleted, deferred, trimmedPos = Events.prune ctx streamName 5
+        test <@ deleted = 3 && deferred = 2 && trimmedPos = 3 @>
+
+        // Repeat the process, but this time there should be no actual deletes
+        let! deleted, deferred, trimmedPos = Events.prune ctx streamName 4
+        test <@ deleted = 0 && deferred = 1 && trimmedPos = 3 @>
+
+        let! res = Events.get ctx streamName 0L 5
+
+        verifyCorrectEvents 5L expected res
+
+        test <@ [EqxAct.ResponseForward; EqxAct.QueryForward] = capture.ExternalCalls @>
+        verifyRequestChargesMax 1
+    }
