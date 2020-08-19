@@ -750,70 +750,70 @@ module internal Tip =
             let t = StopwatchInterval(startTicks, endTicks)
             log |> logQuery direction maxItems stream t (!responseCount,allSlices.ToArray()) -1L ru }
 
-    // Manages deletion of batches
-    // Note: it's critical that we delete individually, in the correct order so as not to leave gaps
-    module Delete =
+// Manages deletion of batches
+// Note: it's critical that we delete individually, in the correct order so as not to leave gaps
+module Delete =
 
-        // If we have results: []
-        // - deleteBefore  9 would: return 0,0,0
+    // If we have results: []
+    // - deleteBefore  9 would: return 0,0,0
 
-        // If we have results: ["-1",10,10; "0",0,1; "2",1,3; "3",3,8; "8",8,10]
-        // - deleteBefore  3 would: inspect first 3, delete 2, return 3,0,3
-        // - deleteBefore  4 would: inspect first 4, delete 2, return 3,1,3
-        // - deleteBefore  8 would: inspect first 4, delete 2, return 8,0,8
+    // If we have results: ["-1",10,10; "0",0,1; "2",1,3; "3",3,8; "8",8,10]
+    // - deleteBefore  3 would: inspect first 3, delete 2, return 3,0,3
+    // - deleteBefore  4 would: inspect first 4, delete 2, return 3,1,3
+    // - deleteBefore  8 would: inspect first 4, delete 2, return 8,0,8
 
-        // If we have results: ["-1",10,10; "8",8,10]
-        // - deleteBefore  3 would: inspect first 2, delete 0, return 0,0,8
-        // - deleteBefore  8 would: inspect first 2, delete 0, return 0,0,8
-        // - deleteBefore  9 would: inspect first 2, delete 0, return 0,1,8
-        // - deleteBefore 10 would: inspect first 2, delete 1, return 2,0,10
-        // - deleteBefore 11 would: inspect first 2, delete 1, return 2,0,10
+    // If we have results: ["-1",10,10; "8",8,10]
+    // - deleteBefore  3 would: inspect first 2, delete 0, return 0,0,8
+    // - deleteBefore  8 would: inspect first 2, delete 0, return 0,0,8
+    // - deleteBefore  9 would: inspect first 2, delete 0, return 0,1,8
+    // - deleteBefore 10 would: inspect first 2, delete 1, return 2,0,10
+    // - deleteBefore 11 would: inspect first 2, delete 1, return 2,0,10
 
-        // If we have results: ["-1",10,10]
-        // - deleteBefore  9 would: inspect first 1, delete 0, return 0,0,10
-        // - deleteBefore 10 would: inspect first 1, delete 0, return 0,0,10
-        // - deleteBefore 11 would: inspect first 1, delete 0, return 0,0,10
-        type BatchIndices = { id : string; i : int; n : int }
-        let pruneBefore (log: ILogger) (container: Container, stream: string) maxItems beforePos : Async<int * int * int64> = async {
-            let query : FeedIterator<BatchIndices> =
-                 let qro = QueryRequestOptions(PartitionKey=Nullable(PartitionKey stream), MaxItemCount=Nullable maxItems)
-                 container.GetItemQueryIterator<_>(QueryDefinition "SELECT c.id, c.i, c.n FROM c", requestOptions=qro)
-            let tryReadNextPage (x : FeedIterator<_>) = async {
-                if not x.HasMoreResults then return None else
+    // If we have results: ["-1",10,10]
+    // - deleteBefore  9 would: inspect first 1, delete 0, return 0,0,10
+    // - deleteBefore 10 would: inspect first 1, delete 0, return 0,0,10
+    // - deleteBefore 11 would: inspect first 1, delete 0, return 0,0,10
+    type BatchIndices = { id : string; i : int; n : int }
+    let pruneBefore (log: ILogger) (container: Container, stream: string) maxItems beforePos : Async<int * int * int64> = async {
+        let query : FeedIterator<BatchIndices> =
+             let qro = QueryRequestOptions(PartitionKey=Nullable(PartitionKey stream), MaxItemCount=Nullable maxItems)
+             container.GetItemQueryIterator<_>(QueryDefinition "SELECT c.id, c.i, c.n FROM c", requestOptions=qro)
+        let tryReadNextPage (x : FeedIterator<_>) = async {
+            if not x.HasMoreResults then return None else
 
-                let! ct = Async.CancellationToken
-                let! t, (res : FeedResponse<_>) = query.ReadNextAsync(ct) |> Async.AwaitTaskCorrect |> Stopwatch.Time
-                let batches, rc, ms = Array.ofSeq res, res.RequestCharge, (let e = t.Elapsed in e.TotalMilliseconds)
-                let reqMetric : Log.Measurement = { stream = stream; interval = t; bytes = -1; count = batches.Length; ru = rc }
-                let next = Array.tryLast batches |> Option.map (fun x -> x.n) |> Option.toNullable
-                let log = let evt = Log.DelResponse reqMetric in log |> Log.event evt |> Log.prop "beforePos" beforePos
-                log.Information("EqxCosmos {action:l} {batches} {ms}ms n={next} rc={ru}", "DelResponse", batches.Length, ms, next, rc)
-                return Some ((t, rc, batches), x)
-            }
-            let! outcomes =
-                let isTip (x : BatchIndices) = x.id = Tip.WellKnownDocumentId
-                let isValid x = isTip x || x.n <= beforePos
-                let hasValidItems (_, _, batches) = batches |> Array.exists isValid
-                let handle (t, rc, batches : BatchIndices[]) = async {
-                    let mutable lwm = 0
-                    for x in batches |> Seq.takeWhile isValid do
-                        lwm <- min lwm x.n
-                        if (not << isTip) x then
-                            do!
-
-                    let lwm = batches |> Seq.min
-                    return t, rc
-                }
-                AsyncSeq.unfoldAsync tryReadNextPage query
-                |> AsyncSeq.takeWhile hasValidItems
-                |> AsyncSeq.mapAsync handle
-                |> AsyncSeq.toArrayAsync
-            let index = if count = 0 then Nullable () else Nullable <| Seq.min (seq { for x in batches -> x.i })
-            (log |> (match startPos with Some pos -> Log.propStartPos pos | None -> id) |> Log.prop "bytes" bytes)
-                .Information("EqxCosmos {action:l} {count}/{batches} {direction} {ms}ms i={index} rc={ru}",
-                    "Delete", count, batches.Length, direction, (let e = t.Elapsed in e.TotalMilliseconds), index, ru)
-            return ()
+            let! ct = Async.CancellationToken
+            let! t, (res : FeedResponse<_>) = query.ReadNextAsync(ct) |> Async.AwaitTaskCorrect |> Stopwatch.Time
+            let batches, rc, ms = Array.ofSeq res, res.RequestCharge, (let e = t.Elapsed in e.TotalMilliseconds)
+            let reqMetric : Log.Measurement = { stream = stream; interval = t; bytes = -1; count = batches.Length; ru = rc }
+            let next = Array.tryLast batches |> Option.map (fun x -> x.n) |> Option.toNullable
+            let log = let evt = Log.DelResponse reqMetric in log |> Log.event evt |> Log.prop "beforePos" beforePos
+            log.Information("EqxCosmos {action:l} {batches} {ms}ms n={next} rc={ru}", "DelResponse", batches.Length, ms, next, rc)
+            return Some ((t, rc, batches), x)
         }
+        let! outcomes =
+            let isTip (x : BatchIndices) = x.id = Tip.WellKnownDocumentId
+            let isValid x = isTip x || x.n <= beforePos
+            let hasValidItems (_, _, batches) = batches |> Array.exists isValid
+            let handle (t, rc, batches : BatchIndices[]) = async {
+                let mutable lwm = 0
+                for x in batches |> Seq.takeWhile isValid do
+                    lwm <- min lwm x.n
+                    if (not << isTip) x then
+                        do!
+
+                let lwm = batches |> Seq.min
+                return t, rc
+            }
+            AsyncSeq.unfoldAsync tryReadNextPage query
+            |> AsyncSeq.takeWhile hasValidItems
+            |> AsyncSeq.mapAsync handle
+            |> AsyncSeq.toArrayAsync
+        let index = if count = 0 then Nullable () else Nullable <| Seq.min (seq { for x in batches -> x.i })
+        (log |> (match startPos with Some pos -> Log.propStartPos pos | None -> id) |> Log.prop "bytes" bytes)
+            .Information("EqxCosmos {action:l} {count}/{batches} {direction} {ms}ms i={index} rc={ru}",
+                "Delete", count, batches.Length, direction, (let e = t.Elapsed in e.TotalMilliseconds), index, ru)
+        return ()
+    }
 
 type [<NoComparison>] Token = { container: Container; stream: string; pos: Position }
 module Token =
@@ -919,8 +919,8 @@ type Gateway(conn : Connection, batching : BatchingPolicy) =
         | Sync.Result.Conflict (pos',events) -> return InternalSyncResult.Conflict (Token.create containerStream pos',events)
         | Sync.Result.ConflictUnknown pos' -> return InternalSyncResult.ConflictUnknown (Token.create containerStream pos')
         | Sync.Result.Written pos' -> return InternalSyncResult.Written (Token.create containerStream pos') }
-    member __.Delete(stream, beforeIndex) = async {
-
+    member __.Prune(log, container, stream, beforeIndex) = async {
+        return! Delete.pruneBefore log (container, stream) maxItems
     }
 
 type private Category<'event, 'state, 'context>(gateway : Gateway, codec : IEventCodec<'event,byte[],'context>) =
@@ -1327,8 +1327,8 @@ type Context
         | AppendResult.Ok token -> return token
         | x -> return x |> sprintf "Conflict despite it being disabled %A" |> invalidOp }
 
-    member __.Delete(stream, beforePosition) : Async<int * int * int64> =
-        gateway.Delete(stream, beforePosition)
+    member __.Prune(stream, beforePosition) : Async<int * int * int64> =
+        gateway.Prune(stream, beforePosition)
 
 /// Provides mechanisms for building `EventData` records to be supplied to the `Events` API
 type EventData() =
@@ -1389,7 +1389,7 @@ module Events =
     /// Due to the need to preserve ordering of data in the stream, only full batches will be removed
     /// Returns count of events deleted this time, events that were retained due to partial batches, and the updated lowest sequence number
     let prune (ctx: Context) (streamName: string) (index: int64): Async<int * int * int64> =
-        ctx.Delete(ctx.CreateStream streamName, Position.fromI index)
+        ctx.Prune(ctx.CreateStream streamName, Position.fromI index)
 
     /// Returns an async sequence of events in the stream backwards starting from the specified sequence number,
     /// reading in batches of the specified size.
