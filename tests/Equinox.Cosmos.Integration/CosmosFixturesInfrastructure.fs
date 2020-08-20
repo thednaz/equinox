@@ -85,7 +85,7 @@ module SerilogHelpers =
         | Event.SyncConflict (Stats s) -> CosmosWriteRc s
         | Event.SyncResync (Stats s) -> CosmosResyncRc s
         | Event.Delete (Stats s) -> CosmosDeleteRc s
-        | Event.Prune (_, _, (Stats s)) -> CosmosPruneRc s
+        | Event.Prune (_, (Stats s)) -> CosmosPruneRc s
     /// Facilitates splitting between events with direct charges vs synthetic events Equinox generates to avoid double counting
     let (|CosmosRequestCharge|EquinoxChargeRollup|) = function
         | CosmosResponseRc _ ->

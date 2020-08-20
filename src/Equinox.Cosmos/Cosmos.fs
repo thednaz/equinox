@@ -237,8 +237,9 @@ module Log =
         /// Deleted an individual Batch
         | Delete of Measurement
         /// Pruned batches from head of a stream
-        /// Count in Measurement is number of PruneResponses handled
-        | Prune of eventCount: int * batchCount : int * Measurement
+        /// Count in Measurement is number of batches (documents) deleted
+        /// Bytes in Measurement is number of events deleted
+        | Prune of responsesHandled : int * Measurement
     let prop name value (log : ILogger) = log.ForContext(name, value)
     let propData name (events: #IEventData<byte[]> seq) (log : ILogger) =
         let render = function null -> "null" | bytes -> System.Text.Encoding.UTF8.GetString bytes
@@ -287,7 +288,7 @@ module Log =
                 | SyncConflict (Stats s) -> CosmosWriteRc s
                 | SyncResync (Stats s) -> CosmosResyncRc s
                 | Delete (Stats s) -> CosmosDeleteRc s
-                | Prune (_, _, (Stats s)) -> CosmosPruneRc s
+                | Prune (_, (Stats s)) -> CosmosPruneRc s
             let (|SerilogScalar|_|) : LogEventPropertyValue -> obj option = function
                 | (:? ScalarValue as x) -> Some x.Value
                 | _ -> None
@@ -863,8 +864,8 @@ module Delete =
             batchesDeleted <- batchesDeleted + bDel
             eventsDeleted <- eventsDeleted + eDel
             eventsDeferred <- eventsDeferred + eDef
-        let reqMetric : Log.Measurement = { stream = stream; interval = pt; bytes = -1; count = responses; ru = queryCharges }
-        let log = let evt = Log.Prune (eventsDeleted, batchesDeleted, reqMetric) in log |> Log.event evt
+        let reqMetric : Log.Measurement = { stream = stream; interval = pt; bytes = eventsDeleted; count = batchesDeleted; ru = queryCharges }
+        let log = let evt = Log.Prune (responses, reqMetric) in log |> Log.event evt
         let lwm =
             match lwm, tipI with
             | Some lwm, _     -> lwm  // we saw a batch and identified a Low Water mark based on it
